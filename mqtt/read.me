@@ -1,0 +1,475 @@
+================================================================================
+PROYECTO MQTT - COMUNICACION PUB/SUB CON PATRON OBSERVER
+================================================================================
+
+Sistema de mensajeria distribuida entre computadoras usando un broker MQTT
+propio, implementado desde cero con los modulos nativos de Node.js.
+
+Sin librerias de terceros para MQTT. Sin Mosquitto. Sin microservicios.
+
+
+--------------------------------------------------------------------------------
+1. DESCRIPCION
+--------------------------------------------------------------------------------
+
+Aplicacion distribuida donde un cliente proveedor publica mensajes en un
+canal, y un cliente consumidor se suscribe a un canal para recibir los
+mensajes en tiempo real.
+
+El backend actua como intermediario y aplica el patron Observer sobre los
+canales: cada canal notifica a sus suscriptores cuando llega un mensaje.
+
+Todo el protocolo MQTT (CONNECT, CONNACK, PUBLISH, SUBSCRIBE, SUBACK,
+PINGREQ, PINGRESP, DISCONNECT) esta implementado desde cero usando
+unicamente net y Buffer de Node.js.
+
+
+--------------------------------------------------------------------------------
+2. MODELO CONCEPTUAL
+--------------------------------------------------------------------------------
+
+2.1 USUARIO COMO PROVEEDOR
+Cualquier usuario puede actuar como proveedor identificandose con un
+nombre. Un proveedor no esta atado a un canal fijo: elige el canal cada
+vez que publica un mensaje.
+
+2.2 USUARIO COMO CONSUMIDOR
+Cualquier usuario puede actuar como consumidor identificandose con un
+nombre. Un consumidor elige a que canal suscribirse, y puede estar
+suscrito a varios canales a la vez.
+
+2.3 CANAL COMO PUNTO DE ENCUENTRO
+El canal es el unico punto de union entre proveedor y consumidor. Los
+canales no estan predefinidos: se crean dinamicamente la primera vez que
+alguien publica o se suscribe a ellos.
+
+2.4 REGLAS DEL MODELO
+- El usuario no elige a otro usuario; el usuario ES proveedor o ES consumidor.
+- Un proveedor puede publicar en multiples canales.
+- Un consumidor puede suscribirse a multiples canales.
+- Un canal existe mientras tenga actividad; el backend lo administra.
+- El backend valida todo payload antes de procesarlo.
+- El formato del JSON lo define el backend; los valores los pone el usuario.
+
+
+--------------------------------------------------------------------------------
+3. ARQUITECTURA
+--------------------------------------------------------------------------------
+
+[Cliente Proveedor]                      [Cliente Consumidor]
+ (otra PC o la misma)                     (otra PC o la misma)
+        |                                        |
+        | HTTP + WebSocket                       | HTTP + WebSocket
+        v                                        v
+   +----------------------------------------------------------+
+   |           BACKEND NODE (un solo proceso)                 |
+   |                                                          |
+   |   +-----------+  +------------+  +------------------+    |
+   |   | Express   |  | socket.io  |  | Broker MQTT      |    |
+   |   | :3000     |  |            |  | propio :1883     |    |
+   |   +-----------+  +------------+  +------------------+    |
+   |                                                          |
+   |   Observer + Mapa de suscriptores + Canales dinamicos    |
+   +----------------------------------------------------------+
+
+3.1 POR QUE MQTT PROPIO Y NO MOSQUITTO NI AEDES
+- Requisito academico: MQTT explicito, sin broker de terceros.
+- El broker (BrokerMqtt.js) y el cliente (ClienteMqtt.js) son propios,
+  implementados con net y Buffer.
+- No se usa la libreria mqtt, ni aedes, ni mosquitto.
+- El protocolo MQTT 3.1.1 esta implementado en su version minima
+  (QoS 0) pero completa para el flujo pub/sub.
+
+3.2 PAQUETES MQTT IMPLEMENTADOS
+- CONNECT (1)
+- CONNACK (2)
+- PUBLISH (3) - QoS 0
+- SUBSCRIBE (8)
+- SUBACK (9)
+- PINGREQ (12)
+- PINGRESP (13)
+- DISCONNECT (14)
+
+3.3 SEPARACION DE RESPONSABILIDADES
+El backend es un solo proceso. No hay microservicios. Toda la logica
+(MQTT, Observer, canales, mapa de suscriptores, validacion) vive en el
+mismo proceso Node.
+
+Los clientes solo hacen peticiones HTTP y, opcionalmente, se conectan
+por WebSocket.
+
+
+--------------------------------------------------------------------------------
+4. STACK TECNOLOGICO
+--------------------------------------------------------------------------------
+
+Capa                  | Tecnologia
+----------------------|----------------------------------------------------
+Runtime               | Node.js (v18 o superior)
+Servidor HTTP         | Express
+WebSocket             | socket.io
+Broker MQTT           | Propio (net + Buffer)
+Cliente MQTT          | Propio (net + Buffer)
+Patron de diseno      | Observer
+Variables de entorno  | dotenv
+CORS                  | cors
+
+Dependencias instaladas (ninguna es de MQTT):
+- express
+- socket.io
+- cors
+- dotenv
+- nodemon (desarrollo)
+
+Modulos nativos usados:
+- net (sockets TCP)
+- Buffer (bytes MQTT)
+- http
+- os
+
+
+--------------------------------------------------------------------------------
+5. ESTRUCTURA DEL PROYECTO
+--------------------------------------------------------------------------------
+
+mqtt/
+|
++-- README.md
+|
++-- backend/
+    |
+    +-- package.json
+    +-- .env
+    |
+    +-- server.js                 (arranque: Express + socket.io + broker)
+    +-- BrokerMqtt.js             (broker MQTT propio)
+    +-- ClienteMqtt.js            (cliente MQTT propio, interno)
+    +-- ConexionCliente.js        (cada conexion MQTT entrante)
+    +-- Encoder.js                (objetos MQTT -> bytes)
+    +-- Decoder.js                (bytes MQTT -> objetos)
+    +-- TipoPaquete.js            (constantes del protocolo)
+    +-- Subject.js                (canal observable - Observer)
+    +-- Observer.js               (suscriptor - Observer)
+    +-- ChannelManager.js         (mapa canal -> Subject)
+
+
+--------------------------------------------------------------------------------
+6. FASES DE DESARROLLO
+--------------------------------------------------------------------------------
+
+Fase | Descripcion                                         | Estado
+-----|-----------------------------------------------------|------------
+0    | Setup del entorno y README                          | OK
+1    | Backend minimo (Express + socket.io)                | OK
+2    | Broker MQTT propio + cliente MQTT propio            | OK
+3    | Endpoints /publish y /subscribe + WebSocket         | OK
+4    | Patron Observer formal (Subject / Observer)         | OK
+5    | Mapa de suscriptores expuesto                       | OK
+6    | Canales dinamicos                                   | OK
+7    | Endpoints de diagnostico (/info, /canales, /mensajes) | OK
+8    | Escuchar en 0.0.0.0 para demo entre dos PCs         | OK
+9    | Pruebas entre computadoras                          | OK
+10   | Documentacion final                                 | OK
+
+
+--------------------------------------------------------------------------------
+7. FLUJO DE UN MENSAJE
+--------------------------------------------------------------------------------
+
+1. Un cliente envia por HTTP:
+
+   POST /publish
+   {
+     "canal": "sensores/temperatura",
+     "contenido": "23.5 grados",
+     "emisor": "estacion-01"
+   }
+
+2. El backend valida el payload.
+
+3. El backend publica el mensaje en su propio broker MQTT
+   (ClienteMqtt.publicar) usando el canal como topic.
+
+4. El broker MQTT (BrokerMqtt) recibe el PUBLISH y lo enruta
+   (ChannelManager.publicar).
+
+5. El Subject del canal notifica a todos sus Observers
+   (Subject.notificar).
+
+6. Cada Observer envia el PUBLISH al cliente MQTT que corresponde
+   (Observer.actualizar -> ConexionCliente.enviarPublicacion).
+
+7. El backend, que tambien es un cliente MQTT suscrito al canal,
+   recibe el PUBLISH.
+
+8. El backend guarda el mensaje en el historial y lo emite por
+   socket.io al canal correspondiente.
+
+9. Los clientes suscritos por WebSocket lo reciben en tiempo real.
+
+
+--------------------------------------------------------------------------------
+8. PATRON OBSERVER APLICADO
+--------------------------------------------------------------------------------
+
+- Subject: cada canal (por ejemplo "sensores/temperatura"). Mantiene
+  una lista de observadores y los notifica cuando llega un mensaje.
+
+- Observer: cada cliente MQTT suscrito a un canal. Implementa el
+  metodo actualizar(mensaje) que se ejecuta al ser notificado.
+
+- ChannelManager: mapa global canal -> Subject. Permite crear,
+  consultar y eliminar canales dinamicamente. Tambien expone el
+  mapa de suscriptores.
+
+Flujo del Observer:
+
+   BrokerMqtt.enrutarMensaje(canal, payload, emisor)
+       |
+       v
+   ChannelManager.publicar(canal, mensaje)
+       |
+       v
+   Subject(canal).notificar(mensaje)
+       |
+       v
+   for cada Observer del Subject:
+       Observer.actualizar(mensaje)
+           |
+           v
+       ConexionCliente.enviarPublicacion(canal, payload)
+
+
+--------------------------------------------------------------------------------
+9. FORMATOS JSON UTILIZADOS
+--------------------------------------------------------------------------------
+
+9.1 MENSAJE
+
+{
+  "id": "msg-1730000000000",
+  "canal": "sensores/temperatura",
+  "contenido": "23.5 grados",
+  "emisor": "estacion-01",
+  "timestamp": 1730000000000
+}
+
+El id y el timestamp los genera el backend.
+Los demas campos los proporciona el usuario.
+
+9.2 SUSCRIPCION
+
+{
+  "canal": "sensores/temperatura",
+  "consumidorId": "consumidor-01"
+}
+
+9.3 RESPUESTA DE LA API
+
+{
+  "ok": true,
+  "mensaje": "operacion exitosa",
+  "data": { }
+}
+
+
+--------------------------------------------------------------------------------
+10. ENDPOINTS DE LA API
+--------------------------------------------------------------------------------
+
+10.1 GET /
+Descripcion: verifica que el backend este activo.
+Respuesta: { ok: true, mensaje: "backend mqtt activo" }
+
+10.2 GET /info
+Descripcion: devuelve los puertos, las IPs de la maquina y la lista
+de endpoints disponibles.
+Uso: util para saber a que IP conectarse desde otra PC.
+
+10.3 GET /suscriptores
+Descripcion: devuelve el mapa de suscriptores (canal -> suscriptores).
+Respuesta:
+{
+  "canal1": ["backend-interno@canal1"],
+  "canal2": ["backend-interno@canal2"]
+}
+
+10.4 GET /canales
+Descripcion: devuelve los canales activos con sus suscriptores y
+cantidad de mensajes recibidos.
+
+10.5 GET /mensajes/:canal
+Descripcion: devuelve el historial de los ultimos 50 mensajes
+recibidos en un canal especifico.
+Ejemplo: GET /mensajes/canal1
+
+10.6 POST /publish
+Descripcion: publica un mensaje en un canal.
+Body:
+{
+  "canal": "canal1",
+  "contenido": "hola mundo",
+  "emisor": "ana"
+}
+
+10.7 POST /subscribe
+Descripcion: suscribe un consumidor a un canal.
+Body:
+{
+  "canal": "canal1",
+  "consumidorId": "luis"
+}
+
+
+--------------------------------------------------------------------------------
+11. COMO EJECUTAR EL PROYECTO
+--------------------------------------------------------------------------------
+
+11.1 REQUISITOS
+- Node.js v18 o superior
+- npm
+- Windows, Linux o Mac
+
+11.2 INSTALACION
+
+cd backend
+npm install
+
+11.3 EJECUCION
+
+cd backend
+npm run dev
+
+El backend arranca en:
+- HTTP: puerto 3000 (escucha en 0.0.0.0)
+- MQTT: puerto 1883 (escucha en 0.0.0.0)
+- WebSocket: sobre el mismo puerto 3000
+
+Al arrancar muestra las IPs disponibles:
+
+[http] servidor escuchando en 0.0.0.0:3000
+[http] accesible desde:
+[http]   local:    http://localhost:3000
+[http]   red:      http://192.168.1.42:3000
+[broker] mqtt escuchando en 0.0.0.0:1883
+
+Anotar la IP de red. Esa es la que usan las otras computadoras.
+
+
+--------------------------------------------------------------------------------
+12. PRUEBAS ENTRE DOS COMPUTADORAS
+--------------------------------------------------------------------------------
+
+12.1 REQUISITOS
+- Las dos PCs en la misma red (Wi-Fi o Ethernet).
+- Puertos 3000 y 1883 abiertos en el firewall de la PC servidor.
+
+12.2 ABRIR EL FIREWALL EN LA PC SERVIDOR
+Ejecutar PowerShell como administrador:
+
+New-NetFirewallRule -DisplayName "MQTT Backend HTTP" -Direction Inbound -Protocol TCP -LocalPort 3000 -Action Allow
+New-NetFirewallRule -DisplayName "MQTT Backend MQTT" -Direction Inbound -Protocol TCP -LocalPort 1883 -Action Allow
+
+12.3 COMPROBAR CONEXION DESDE LA OTRA PC
+
+Invoke-RestMethod -Uri "http://192.168.1.42:3000/info" -Method Get
+
+Reemplazar 192.168.1.42 por la IP real de la PC servidor.
+
+12.4 SUSCRIBIRSE A UN CANAL
+
+$body = @{ canal = "canal/prueba"; consumidorId = "pc2-luis" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://192.168.1.42:3000/subscribe" -Method Post -Body $body -ContentType "application/json"
+
+12.5 PUBLICAR EN EL CANAL
+
+$body = @{ canal = "canal/prueba"; contenido = "hola desde pc2"; emisor = "pc2-ana" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://192.168.1.42:3000/publish" -Method Post -Body $body -ContentType "application/json"
+
+12.6 VER LOS MENSAJES RECIBIDOS
+
+Invoke-RestMethod -Uri "http://192.168.1.42:3000/mensajes/canal/prueba" -Method Get
+
+12.7 VER LOS CANALES ACTIVOS
+
+Invoke-RestMethod -Uri "http://192.168.1.42:3000/canales" -Method Get
+
+
+--------------------------------------------------------------------------------
+13. LOGS DE EJEMPLO
+--------------------------------------------------------------------------------
+
+Arranque:
+
+[broker] broker MQTT escuchando en puerto 1883
+[broker] CONNECT de backend-interno
+[broker] cliente registrado: backend-interno
+[cliente-mqtt] backend-interno conectado al broker
+[http] servidor escuchando en 0.0.0.0:3000
+[http] accesible desde:
+[http]   local:    http://localhost:3000
+[http]   red:      http://192.168.1.42:3000
+[broker] mqtt escuchando en 0.0.0.0:1883
+
+Suscripcion:
+
+[broker] SUBSCRIBE de backend-interno a canal/prueba
+[cliente-mqtt] backend-interno suscrito a canal/prueba
+[subject] backend-interno@canal/prueba agregado al canal canal/prueba
+
+Publicacion y notificacion:
+
+[cliente-mqtt] backend-interno publico en canal/prueba
+[broker] PUBLISH de backend-interno en canal/prueba
+[broker] enrutando mensaje en canal/prueba desde pc2-ana
+[subject] canal/prueba notificado a 1 observador(es)
+[observer] backend-interno@canal/prueba recibio mensaje en canal/prueba
+[puente] reenviando mensaje de canal/prueba por socket.io
+
+
+--------------------------------------------------------------------------------
+14. CONVENCIONES DE CODIGO
+--------------------------------------------------------------------------------
+
+- Sin emojis en el codigo fuente.
+- Uso de clases para todo lo que tenga estado o responsabilidad.
+- Metodos con parametros claros y retorno explicito.
+- JSON como formato de transporte entre capas.
+- Nombres en espanol para el dominio (canal, suscriptor, mensaje).
+- Nombres en ingles para lo tecnico (Broker, Client, Socket).
+- Logs con prefijo entre corchetes: [http], [mqtt], [socket], [broker],
+  [subject], [observer], [canal], [puente], [cliente-mqtt].
+
+
+--------------------------------------------------------------------------------
+15. AUTORES
+--------------------------------------------------------------------------------
+
+- [Nombre del autor]
+- [Nombre del companero, si aplica]
+
+
+--------------------------------------------------------------------------------
+16. FECHA
+--------------------------------------------------------------------------------
+
+[Fecha del proyecto]
+
+
+--------------------------------------------------------------------------------
+17. REFERENCIAS
+--------------------------------------------------------------------------------
+
+- Especificacion MQTT 3.1.1:
+  https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html
+- Patron Observer:
+  https://refactoring.guru/design-patterns/observer
+- Node.js net module:
+  https://nodejs.org/api/net.html
+- Node.js Buffer:
+  https://nodejs.org/api/buffer.html
+- Socket.IO:
+  https://socket.io/
+
+
+================================================================================
